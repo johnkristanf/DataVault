@@ -1,0 +1,9 @@
+root = "./cmd/datavault/main.go"  # Root directory of your project
+
+[build]
+  bin = "main"  # Name of your Go binary file
+  exclude = ["assets", "tmp"]  # Directories to exclude from watching
+
+[[watcher]]
+  paths = ["./"]  # Watch the entire directory for changes
+  build_delay = "1000ms"  # Delay before rebuilding the server after changes (optional)
