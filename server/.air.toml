@@ -1,4 +1,4 @@
-root = "./cmd/datavault/main.go"  # Root directory of your project
+root = "./cmd/datavault"  # Root directory of your project
 
 [build]
   bin = "main"  # Name of your Go binary file
