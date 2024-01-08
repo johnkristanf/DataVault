@@ -2,17 +2,21 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"server/config/db"
+	"server/internal/auth"
+    "server/internal/struct"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
-	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/crypto/bcrypt"
+
 )
 
 
@@ -29,6 +33,7 @@ type LoginCredentials struct {
 }
 
 type emailExist struct{
+	UserID string `bson:"_id"`
 	Email string `bson:"email"`
 	Password string `bson:"password"`
 }
@@ -40,227 +45,225 @@ type ValidationError struct {
 
 
 
+
+
 var userCollection *mongo.Collection = database.UserCollection()
 var wg sync.WaitGroup
 
 
-func SignUp(ctx *gin.Context){
+func SignUp(ctx *gin.Context) {
 
-	startTime := time.Now()
+    startTime := time.Now()
 
-	var newUser SignUpCredentials
+	fmt.Println("sign new new err")
 
-	hashedPasswordCh := make(chan string, 1)
-	invalidInputCh := make(chan ValidationError) 
+    var newUser SignUpCredentials
 
-	emailExistCh := make(chan emailExist)
-
-
-	wg.Add(4)
-
-	go func (){
-		defer wg.Done()
-
-		if jsonbindErr := bindUserDataJson(ctx, &newUser); jsonbindErr != nil{
-			ctx.JSON(http.StatusInternalServerError, gin.H{"JSON BINDING ERROR": jsonbindErr.Error()})
-			ctx.Abort()
-			return
-		}
-	}()
+    errChan := make(chan error, 4) 
+    hashedPasswordCh := make(chan string, 1) 
+    invalidInputCh := make(chan ValidationError, 4)
+    emailExistChan := make(chan emailExist, 1) 
 
 
-	go func ()  {
-		defer wg.Done()
+    wg.Add(4)
 
-		emailExist, emailExistErr := checkEmailExist(&newUser.Email)
-		log.Println("emailExist", emailExist)
-
-		if emailExistErr != nil{
-			ctx.JSON(http.StatusInternalServerError, gin.H{"CHECKING EMAIL ERROR": emailExistErr.Error()})
-			close(emailExistCh)
-			ctx.Abort()
-			return
-		}
-
-		emailExistCh <- emailExist
-		close(emailExistCh)
-	}()
-
-	    user := <-emailExistCh
-
-	    if user.Email != "" {
-		    ctx.JSON(http.StatusInternalServerError, gin.H{"emailExist": "Email Address taken"})
-		    ctx.Abort()
-		    return
-	    }
+    go func() {
+        defer wg.Done()
+        bindUserDataJson(ctx, &newUser, errChan)
+    }()
 
 	
-	go func ()  {
-		defer wg.Done()
-		hashedPassword, hashErr := hashPassword([]byte(newUser.Password))
+    go func() {
+        defer wg.Done()
+        checkEmailExist(&newUser.Email, emailExistChan, errChan)
+    }()
 
-		if(hashErr != nil){
-			ctx.JSON(http.StatusInternalServerError, gin.H{"HASHING PASSWORD ERROR": hashErr.Error()})
-			ctx.Abort()
-			close(hashedPasswordCh)
-		    return
-		}
 
-		hashedPasswordCh <- hashedPassword
-		close(hashedPasswordCh)
+    go func() {
+        defer wg.Done()
+        hashPassword([]byte(newUser.Password), hashedPasswordCh, errChan)
+    }()
+
+
+    go func() {
+        defer wg.Done()
+        validate(&newUser, invalidInputCh)
+    }()
+
+
+    
+	go func() {
+		wg.Wait()
+		close(errChan)
 	}()
-	
-
-	newUser.Password = <- hashedPasswordCh
-	
-
-	go func ()  {
-		defer wg.Done()	
-		validate(ctx, &newUser, invalidInputCh)
-		close(invalidInputCh)
-	}()
 
 
-	for invalid := range invalidInputCh{
-		ctx.JSON(http.StatusInternalServerError, gin.H{invalid.Field: invalid.Tag})
-		ctx.Abort()
-		return
-	}
+
+    for err := range errChan {
+
+        if err != mongo.ErrNoDocuments {
+            log.Fatalln("SIGNING UP ERRORS:", err.Error())
+        }
+        
+    }
 
 
-	wg.Wait()
+    for invalid := range invalidInputCh {
+        ctx.JSON(http.StatusInternalServerError, gin.H{invalid.Field: invalid.Tag})
+        return
+    }
 
 
-	signUpResult, signupErr := userCollection.InsertOne(context.Background(), newUser)
-	if signupErr != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{"SIGNING UP ERROR": signupErr.Error()})
-		ctx.Abort()
-		return
-	}
+	user := <-emailExistChan
+
+    if user.Email != "" {
+        ctx.JSON(http.StatusInternalServerError, gin.H{"emailExist": "Email Address taken"})
+        return
+    }
 
 
-	executionTime := time.Since(startTime)
-	ctx.JSON(http.StatusOK, gin.H{"bag o": signUpResult, "ExecutionTime": executionTime.String()})
-	ctx.Abort()
+    newUser.Password = <-hashedPasswordCh
 
+    signUpResult, signupErr := userCollection.InsertOne(context.Background(), newUser)
+    if signupErr != nil {
+        ctx.JSON(http.StatusInternalServerError, gin.H{"INSERTING USER TO DB ERROR": signupErr.Error()})
+        return
+    }
+
+
+    executionTime := time.Since(startTime)
+
+    ctx.JSON(http.StatusOK, gin.H{"New User": signUpResult.InsertedID, "ExecutionTime": executionTime.String()})
 }
+
+
+
+// ------------------------------------- LOGINNN HANDLER ----------------------------------------
 
 
 func Login(ctx *gin.Context){
 
-	loginCredExistCh := make(chan emailExist)
+
+    invalidCredChan := make(chan error, 3)
+    emailExistChan := make(chan emailExist, 1) 
+
 	var loginCredentials LoginCredentials
 
 	wg.Add(3)
 
 	go func ()  {
 		defer wg.Done()
-
-		jsonbindErr := bindUserDataJson(ctx, &loginCredentials)
-
-		if jsonbindErr != nil{
-			ctx.JSON(http.StatusInternalServerError, gin.H{"JSON BINDING ERROR": jsonbindErr.Error()})
-			ctx.Abort()
-			return
-		}
+		bindUserDataJson(ctx, &loginCredentials, invalidCredChan)
 	}()
 
 
 	go func ()  {
-
 		defer wg.Done()
-
-		userCred, emailExistErr := checkEmailExist(&loginCredentials.Email)
-		log.Println("emailExist", userCred)
-
-		if emailExistErr != nil{
-			ctx.JSON(http.StatusInternalServerError, gin.H{"Invalid Credentials": "Invalid Username "})
-			close(loginCredExistCh)
-			ctx.Abort()
-			return
-		}
-
-		loginCredExistCh <- userCred
-		close(loginCredExistCh)
-
+		checkEmailExist(&loginCredentials.Email, emailExistChan, invalidCredChan)
 	}()
 
-	    user := <- loginCredExistCh
-
-
-		go func ()  {
-			defer wg.Done()
-
-			if user.Password != "" {
-				checkvalidPassErr := isValidPassword([]byte(loginCredentials.Password), []byte(user.Password))
-				if checkvalidPassErr != nil {
-					ctx.JSON(http.StatusInternalServerError, gin.H{"Invalid Credentials": "Invalid  Password"})
-					ctx.Abort()
-					return
-				}
-			}
-			
-		}()
-		    
-
-
-	wg.Wait()
-}
-
-
-
-func bindUserDataJson[CredType SignUpCredentials | LoginCredentials](ctx *gin.Context, userCredentials *CredType) error {
-
-    jsonBindErr := ctx.ShouldBindJSON(userCredentials)
-    if jsonBindErr != nil {
-        return jsonBindErr
-    }
-
-	return nil
-}
-
-
-func checkEmailExist(email *string) (emailExist, error) {
-
-    var result emailExist 
-	
-	log.Println("emaildfdf:",  email)
-    field := bson.M{"email": email}
     
-    findEmailErr := userCollection.FindOne(context.Background(), field).Decode(&result)
-	log.Println("result:",  result)
+	user := <- emailExistChan
 
-	
-    if findEmailErr != nil {
+	go func ()  {
+		defer wg.Done()
+		if user.Password != "" {
+			isValidPassword([]byte(loginCredentials.Password), []byte(user.Password), invalidCredChan)
+		}
+	}()
 
-        if findEmailErr == mongo.ErrNoDocuments {
-            log.Println("Email not found")
-            return result, findEmailErr
+
+    go func ()  {
+        wg.Wait()
+        close(invalidCredChan)
+    }()
+
+
+    for err := range invalidCredChan {
+        
+        if err != nil{
+            ctx.JSON(http.StatusUnauthorized, gin.H{"Invalid Credentials": "Invalid Username or Password"})
+            return
         }
     }
 
-    if result.Email != "" {
-        return result, nil 
+
+	tokenString, tokenErr := auth.CreateJwtToken(&user.Email, &user.UserID)
+	if tokenErr != nil{
+		ctx.JSON(http.StatusInternalServerError, gin.H{"Creating Token ERROR": tokenErr.Error()})
+		ctx.Abort()
+		return
     }
 
-    return result, findEmailErr
+    fmt.Println("tokenString", tokenString)
+
+			   
+	if tokenString != "" {
+
+		cookieExp3Days := 259200
+
+        fmt.Println("Cookie bag nan")
+
+        ctx.SetCookie("auth_token", tokenString, cookieExp3Days, "/", "" , false, true)
+	}
+
 }
 
 
-func hashPassword(password []byte) (string, error) {
+// ------------------------------------- AUTH HELPERS ----------------------------------------
+
+
+func bindUserDataJson[CredType SignUpCredentials | LoginCredentials](ctx *gin.Context, userCredentials *CredType, errChan chan error) {
+
+    jsonBindErr := ctx.ShouldBindJSON(userCredentials)
+
+    if jsonBindErr != nil {
+        errChan <- jsonBindErr
+    }
+}
+
+
+func checkEmailExist(email *string, emailExistChan chan emailExist, errChan chan error) {
+
+	defer close(emailExistChan)
+
+	fmt.Println("inputted email new:", email)
+
+    var result emailExist 
+    field := bson.M{"email": email}
+    
+    findEmailErr := userCollection.FindOne(context.Background(), field).Decode(&result)
+	fmt.Println("result", result)
+	
+    if findEmailErr != nil {
+        errChan <- findEmailErr 
+        return
+    }
+
+   
+	emailExistChan <- result
+
+}
+
+
+func hashPassword(password []byte, hashedPasswordChan chan string, errChan chan error){
+    
+	defer close(hashedPasswordChan)
 
 	hashedPassword, hashErr := bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
 	
 	if hashErr != nil {
-		return "", hashErr
+		errChan <- hashErr
 	}
 
-	return string(hashedPassword), nil
+	hashedPasswordChan <- string(hashedPassword)
+	
 }
 
 
 
-func validate[CredType SignUpCredentials | LoginCredentials](ctx *gin.Context, userData *CredType, invalidInputCh chan<- ValidationError) {
+func validate[CredType SignUpCredentials | LoginCredentials](userData *CredType, invalidInputCh chan<- ValidationError) {
+	defer close(invalidInputCh)
 
     validate := validator.New()
     credValidationErr := validate.Struct(userData)
@@ -270,15 +273,59 @@ func validate[CredType SignUpCredentials | LoginCredentials](ctx *gin.Context, u
             invalidInputCh <- ValidationError{Field: err.Field(), Tag: err.Tag()}
         }
     }
+
+	
 }
 
 
-func isValidPassword(password []byte, hashedPassword []byte) error {
+func isValidPassword(password []byte, hashedPassword []byte, invalidCredChan chan error) {
+
 	compareHashErr := bcrypt.CompareHashAndPassword(hashedPassword, password)
 
 	if compareHashErr != nil{
-		return compareHashErr
+		invalidCredChan <- compareHashErr
 	}
 
-	return nil
+    fmt.Println("compareHashErr", compareHashErr)
+
+	
+}
+
+// ------------------------------------- END OF AUTH HELPERS ----------------------------------------
+
+
+
+
+// ------------------------------------- JWT AUTHENTICATION HANDLER ----------------------------------------
+
+func UserData(ctx *gin.Context){
+
+    startTime := time.Now()
+
+    userData, exists := ctx.Get("UserData")
+	if !exists {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"ERROR": "Internal server error"})
+		return
+	}
+
+    user, ok := userData.(*user_struct.UserDataClaims)
+    if !ok {
+        ctx.JSON(http.StatusInternalServerError, gin.H{"ERROR": "Claiming JWT Data"})
+		return
+    }
+
+    fmt.Println("user data in handler", user)
+
+
+    executionTime := time.Since(startTime)
+
+    response := gin.H{
+        "user_id": user.ID,
+        "email": user.Email,
+        "executiontime": executionTime.String(),
+    }
+
+    ctx.JSON(http.StatusOK, response)
+    ctx.Abort()
+
 }
