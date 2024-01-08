@@ -1,7 +1,7 @@
 import '../../../public/loginFormStyle.css'
 
 import { useForm } from 'react-hook-form'
-import { LoginCredTypes } from '../../types/authCredType'
+import { LoginCredTypes, emailPattern } from '../../types/authCredType'
 import { login } from '../../services/http/auth/login'
 import { useNavigate } from 'react-router-dom'
 
@@ -11,13 +11,23 @@ export const LoginForm = ({ setrenderLoginForm }: any) => {
 
     const { register, handleSubmit, formState: { errors }, reset } = useForm<LoginCredTypes>()
 
-    const onSubmit = async (loginCredentials : LoginCredTypes) => {
+    const onSubmit = async (loginCredentials: LoginCredTypes) => {
+      console.log('loginCredentials', loginCredentials);
+    
+      try {
+        const loggedIn = await login(loginCredentials);
+    
+        if (loggedIn) {
+          reset();
+          navigate("/my-vault");
+        }
 
-      reset()
-
-      if(await login(loginCredentials)) navigate('/vault')
-
-    }
+      } catch (error) {
+        console.error("Error during login:", error);
+      }
+      
+    };
+    
 
     return(
         
@@ -27,8 +37,8 @@ export const LoginForm = ({ setrenderLoginForm }: any) => {
 
         <div className="input-container">
 
-          <input placeholder="Enter email" type="email" 
-              {...register("email", { required: true })} 
+          <input placeholder="Enter email" type="text" 
+              {...register("email", { required: true, pattern: emailPattern})} 
           />
 
           <span>
@@ -58,7 +68,7 @@ export const LoginForm = ({ setrenderLoginForm }: any) => {
 
           { errors.password && <p className='text-red-700 text-[12px] font-bold mb-2 ml-1'>Password is Required</p> }
 
-          <button className="submit text-slate-300 font-bold bg-lime-500" type="submit">Sign in</button>
+          <button className="submit text-slate-300 font-bold" type="submit">Sign in</button>
 
 
       <p className="signup-link">
