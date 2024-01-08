@@ -5,9 +5,13 @@ export const login = async (loginCredentials: LoginCredTypes) => {
 
     try {
         
-        const response = await axios.post('http://localhost:900/user/login', loginCredentials);
+        const response = await axios.post('http://localhost:900/user/login', loginCredentials, {
+            withCredentials: true
+        });
 
-        if(response.data) return response.data
+        console.log('login res', response.data)
+
+        if(response) return true
         
     } catch (error) {
         console.error(error)
