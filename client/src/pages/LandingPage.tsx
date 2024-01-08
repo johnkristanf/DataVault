@@ -13,7 +13,6 @@ const LandingPage = () => {
         <div className="h-screen bg-slate-800 flex items-center justify-evenly">
           <DataVaultDesc />
 
-  
             { 
               renderLoginForm 
                 ? <LoginForm setrenderLoginForm={setrenderLoginForm} /> 
