@@ -16,7 +16,10 @@ export const SignUpForm = ({ setrenderLoginForm }: any) => {
 
       const signupSuccess = await signup(signupData)
 
-      if(signupSuccess) reset(); setSignedUpUser(signupSuccess)
+      if(signupSuccess){
+        setSignedUpUser(signupSuccess);
+        reset();
+      }  
       
     } 
 
